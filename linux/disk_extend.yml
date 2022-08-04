@@ -1,0 +1,59 @@
+---
+# Playbook to extend a the root volume in a VM with a simple single-disk setup with LVM
+# Defaults to values from Rocky Linux default install options
+# Vars can be overriden with ansible-playbook's --extra-vars cmdline option
+- hosts: all
+  gather_facts: false
+  become: yes
+  vars:
+    # defaults based on Rocky Linux defaults
+    lvm_vol_group: rl
+    lvm_logical_volume: root
+    disk: /dev/sda
+  pre_tasks:
+    - name: Requirements checks
+      ansible.builtin.assert:
+        that:
+          - ansible_version.full is version_compare('2.10', '>=')
+        fail_msg: "You must update Ansible to v2.10+"
+        quiet: true
+  tasks:
+    - name: Rescan Disks
+      ansible.builtin.command:
+        cmd: /usr/bin/rescan-scsi-bus.sh --resize
+      changed_when: false
+      register: disk_rescan
+
+    - name: Check for Available Free Space
+      ansible.builtin.command:
+        cmd: parted {{ disk }} print free
+      changed_when: false
+      register: parted_free
+
+    - name: Resize Disk
+      block:
+        - name: Get Disk Information
+          community.general.parted:
+            device: "{{ disk }}"
+            state: info
+            unit: GB
+          register: disk_info
+
+        - name: Resize Last LVM Partition
+          ansible.builtin.command:
+            cmd: 'parted {{ disk }} resizepart {{ disk_info.partitions | length }} 100%'
+
+        - name: Resize LVM Volume Group
+          community.general.lvg:
+            vg: '{{ lvm_vol_group }}'
+            pvs: '{{ disk }}{{ disk_info.partitions | length }}'
+            pvresize: true
+
+        - name: Resize LVM Logical Volume and Extend Filesystem
+          community.general.lvol:
+            vg: '{{ lvm_vol_group }}'
+            lv: '{{ lvm_logical_volume }}'
+            size: +100%FREE
+            resizefs: true
+      when: disk_rescan.stdout is search('remapped or resized device(s) found') or
+            parted_free.stdout_lines[-1] is search('Free Space')
